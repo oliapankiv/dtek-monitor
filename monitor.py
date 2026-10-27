@@ -20,10 +20,12 @@ DEFAULT_QUEUES = os.environ.get("QUEUES", "")
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 ALL_LABEL = "Усі черги"
-# Persistent reply keyboard: 1.1 1.2 / 2.1 2.2 / ... / 6.1 6.2 / Усі черги
+# Queue picker shown on /start or /queue: 1.1 1.2 / ... / 6.1 6.2 / Усі черги.
+# It hides itself after one tap.
 KEYBOARD = {"keyboard": [[{"text": f"{n}.1"}, {"text": f"{n}.2"}] for n in range(1, 7)]
                         + [[{"text": ALL_LABEL}]],
-            "resize_keyboard": True, "is_persistent": True}
+            "resize_keyboard": True, "one_time_keyboard": True}
+HIDE_KEYBOARD = {"remove_keyboard": True}
 
 OFF = {"no": (True, True), "first": (True, False), "second": (False, True)}
 MAYBE = {"maybe": (True, True), "mfirst": (True, False), "msecond": (False, True)}
@@ -99,7 +101,7 @@ def parse_queues(text):
     return out or None
 
 
-def build_message(fact, preset, queues, title="Графік відключень ДТЕК змінено"):
+def build_message(fact, preset, queues, title="Графік відключень ДТЕК (Київщина) змінено"):
     names = preset.get("sch_names", {})
     lines = [f"⚡️ <b>{title}</b>",
              f"Оновлено на сайті: {fact.get('update', '?')}", ""]
@@ -116,6 +118,7 @@ def build_message(fact, preset, queues, title="Графік відключень
                 text += f"  🟡 можливо: {fmt(maybe)}"
             lines.append(f"{names.get(q, q)}: {text}")
         lines.append("")
+    lines.append(URL)
     return "\n".join(lines)
 
 
@@ -125,11 +128,11 @@ def relevant(fact, queues):
             for ts, groups in fact["data"].items()}
 
 
-def send(text, keyboard=False):
+def send(text, markup=None):
     body = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML",
             "disable_web_page_preview": True}
-    if keyboard:
-        body["reply_markup"] = KEYBOARD
+    if markup:
+        body["reply_markup"] = markup
     r = requests.post(f"{API}/sendMessage", json=body, timeout=30)
     r.raise_for_status()
 
@@ -149,16 +152,17 @@ def handle_messages(state):
         if text.startswith(("/start", "/queue")):
             send("Оберіть свою чергу кнопкою нижче (або надішліть, напр. <code>6.1</code> "
                  "чи <code>3.2, 6.1</code>).\n/now — поточний графік.\n"
-                 "Бот відповідає протягом ~10 хв.", keyboard=True)
+                 "Бот відповідає протягом ~10 хв.", KEYBOARD)
         elif text.startswith("/now"):
             want_now = True
         elif (queues := parse_queues(text)) is not None:
             state["queues"] = queues
             label = ", ".join(q.removeprefix("GPV") for q in queues) or "усі"
-            send(f"✅ Стежу за чергою: <b>{label}</b>", keyboard=True)
+            send(f"✅ Стежу за чергою: <b>{label}</b>", HIDE_KEYBOARD)
             want_now = True
         else:
-            send("Не зрозумів 🤔 Надішліть номер черги, напр. <code>6.1</code>", keyboard=True)
+            send("Не зрозумів 🤔 Надішліть номер черги, напр. <code>6.1</code> "
+                 "або /queue, щоб обрати кнопкою.")
     return want_now
 
 
