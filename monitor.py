@@ -126,7 +126,6 @@ def build_message(fact, preset, queues, title="Графік відключень
                 text += f"  🟡 можливо: {fmt(maybe)}"
             lines.append(f"{names.get(q, q)}: {text}")
         lines.append("")
-    lines.append(URL)
     return "\n".join(lines)
 
 
