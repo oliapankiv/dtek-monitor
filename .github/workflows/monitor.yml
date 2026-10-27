@@ -27,6 +27,13 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           QUEUES: ${{ vars.QUEUES }}
+      - name: Upload debug page
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug
+          path: debug.*
+          if-no-files-found: ignore
       - name: Save state
         run: |
           git config user.name "dtek-bot"

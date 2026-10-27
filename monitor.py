@@ -15,21 +15,37 @@ KYIV = ZoneInfo("Europe/Kyiv")
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-# Comma-separated queues, e.g. "GPV3.1" or "GPV3.1,GPV4.2". Empty = all queues.
-QUEUES = [q.strip() for q in os.environ.get("QUEUES", "").split(",") if q.strip()]
+# Comma-separated queues, e.g. "6.1" or "GPV3.1,4.2". Empty = all queues.
+QUEUES = [q if q.startswith("GPV") else f"GPV{q}"
+          for q in (q.strip() for q in os.environ.get("QUEUES", "").split(",")) if q]
 
 OFF = {"no": (True, True), "first": (True, False), "second": (False, True)}
 MAYBE = {"maybe": (True, True), "mfirst": (True, False), "msecond": (False, True)}
 
+USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
+
 
 def fetch_html():
     with sync_playwright() as p:
-        browser = p.chromium.launch()
-        page = browser.new_page(locale="uk-UA")
+        browser = p.chromium.launch(args=["--disable-blink-features=AutomationControlled"])
+        page = browser.new_page(locale="uk-UA", user_agent=USER_AGENT,
+                                viewport={"width": 1366, "height": 768})
         page.goto(URL, wait_until="domcontentloaded", timeout=90_000)
-        # The site may show an anti-bot interstitial first; wait for the real data.
-        page.wait_for_function("() => window.DisconSchedule && DisconSchedule.fact", timeout=90_000)
-        html = page.content()
+        # The site may show an anti-bot interstitial first; wait until the
+        # schedule script is in the HTML (DisconSchedule isn't a window global).
+        html = ""
+        for _ in range(45):
+            html = page.content()
+            if "DisconSchedule.fact" in html:
+                break
+            page.wait_for_timeout(2000)
+        else:
+            with open("debug.html", "w", encoding="utf-8") as f:
+                f.write(html)
+            page.screenshot(path="debug.png", full_page=True)
+            raise RuntimeError(f"Schedule not found on page (title: {page.title()!r}); "
+                               "saved debug.html and debug.png")
         browser.close()
     return html
 
