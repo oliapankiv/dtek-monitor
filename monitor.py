@@ -8,6 +8,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 from playwright.sync_api import sync_playwright
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 URL = "https://www.dtek-krem.com.ua/ua/shutdowns"
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
@@ -26,6 +28,12 @@ KEYBOARD = {"keyboard": [[{"text": f"{n}.1"}, {"text": f"{n}.2"}] for n in range
                         + [[{"text": ALL_LABEL}]],
             "resize_keyboard": True, "one_time_keyboard": True}
 HIDE_KEYBOARD = {"remove_keyboard": True}
+
+# GitHub runners sometimes get "connection reset" from Telegram; retry those.
+HTTP = requests.Session()
+HTTP.mount("https://", HTTPAdapter(max_retries=Retry(
+    total=5, backoff_factor=2, allowed_methods=None,
+    status_forcelist=[429, 500, 502, 503, 504])))
 
 OFF = {"no": (True, True), "first": (True, False), "second": (False, True)}
 MAYBE = {"maybe": (True, True), "mfirst": (True, False), "msecond": (False, True)}
@@ -133,14 +141,22 @@ def send(text, markup=None):
             "disable_web_page_preview": True}
     if markup:
         body["reply_markup"] = markup
-    r = requests.post(f"{API}/sendMessage", json=body, timeout=30)
+    r = HTTP.post(f"{API}/sendMessage", json=body, timeout=30)
     r.raise_for_status()
+
+
+def reply(text, markup=None):
+    """Like send(), but a failed reply to a command doesn't stop the run."""
+    try:
+        send(text, markup)
+    except requests.RequestException as e:
+        print(f"Could not send reply: {e}")
 
 
 def handle_messages(state):
     """Read messages sent to the bot since the last run. Returns True if /now was asked."""
-    r = requests.get(f"{API}/getUpdates",
-                     params={"offset": state.get("offset", 0), "timeout": 0}, timeout=30)
+    r = HTTP.get(f"{API}/getUpdates",
+                 params={"offset": state.get("offset", 0), "timeout": 0}, timeout=30)
     r.raise_for_status()
     want_now = False
     for upd in r.json()["result"]:
@@ -150,7 +166,7 @@ def handle_messages(state):
         if str(msg.get("chat", {}).get("id")) != str(CHAT_ID) or not text:
             continue  # ignore strangers who found the bot
         if text.startswith(("/start", "/queue")):
-            send("Оберіть свою чергу кнопкою нижче (або надішліть, напр. <code>6.1</code> "
+            reply("Оберіть свою чергу кнопкою нижче (або надішліть, напр. <code>6.1</code> "
                  "чи <code>3.2, 6.1</code>).\n/now — поточний графік.\n"
                  "Бот відповідає протягом ~10 хв.", KEYBOARD)
         elif text.startswith("/now"):
@@ -158,10 +174,10 @@ def handle_messages(state):
         elif (queues := parse_queues(text)) is not None:
             state["queues"] = queues
             label = ", ".join(q.removeprefix("GPV") for q in queues) or "усі"
-            send(f"✅ Стежу за чергою: <b>{label}</b>", HIDE_KEYBOARD)
+            reply(f"✅ Стежу за чергою: <b>{label}</b>", HIDE_KEYBOARD)
             want_now = True
         else:
-            send("Не зрозумів 🤔 Надішліть номер черги, напр. <code>6.1</code> "
+            reply("Не зрозумів 🤔 Надішліть номер черги, напр. <code>6.1</code> "
                  "або /queue, щоб обрати кнопкою.")
     return want_now
 
@@ -175,7 +191,11 @@ def main():
     if "queues" not in state:
         state["queues"] = parse_queues(DEFAULT_QUEUES) or []
 
-    want_now = handle_messages(state)
+    try:
+        want_now = handle_messages(state)
+    except requests.RequestException as e:
+        print(f"Could not read bot messages: {e}")  # still check the schedule
+        want_now = False
     # Save right away so commands aren't re-processed if fetching the page fails.
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
