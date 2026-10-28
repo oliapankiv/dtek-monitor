@@ -29,6 +29,8 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           QUEUES: ${{ vars.QUEUES }}
           BROWSER_CHANNEL: chrome
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
       - name: Upload debug page
         if: failure()
         uses: actions/upload-artifact@v4
