@@ -44,7 +44,10 @@ USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 def fetch_html():
     with sync_playwright() as p:
-        browser = p.chromium.launch(args=["--disable-blink-features=AutomationControlled"])
+        # BROWSER_CHANNEL=chrome uses the Chrome preinstalled on GitHub runners
+        # (no browser download); unset = Playwright's own Chromium.
+        browser = p.chromium.launch(channel=os.environ.get("BROWSER_CHANNEL") or None,
+                                    args=["--disable-blink-features=AutomationControlled"])
         page = browser.new_page(locale="uk-UA", user_agent=USER_AGENT,
                                 viewport={"width": 1366, "height": 768})
         page.goto(URL, wait_until="domcontentloaded", timeout=90_000)
