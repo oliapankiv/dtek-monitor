@@ -5,11 +5,15 @@
 //   CHAT_ID    (secret)  your chat id; everyone else is ignored
 //   SECRET     (secret)  any long random string, same as WORKER_SECRET in GitHub
 //   STATE      (KV namespace) stores "queues" and "schedule"
+// Optional, used when there is no schedule yet and DTEK blocks the Worker:
+//   GH_TOKEN   (secret)  GitHub token with Actions: Read and write (same as for cron-job.org)
+//   GH_REPO    (text)    e.g. oliapankiv/dtek-monitor
 //
 // Routes:
 //   POST /telegram   Telegram webhook (checks X-Telegram-Bot-Api-Secret-Token)
 //   GET  /queues     for monitor.py: the queues picked in the bot
 //   PUT  /schedule   from monitor.py: latest {fact, names}
+//   GET  /check      open in a browser to see what is missing in the setup
 
 const SITE_URL = "https://www.dtek-krem.com.ua/ua/shutdowns";
 const ALL_LABEL = "Усі черги";
@@ -37,11 +41,22 @@ export default {
       return new Response("ok");
     }
     if (path === "/queues" && request.method === "GET" && auth) {
-      return Response.json({ queues: await env.STATE.get("queues", "json") });
+      return Response.json({
+        queues: await env.STATE.get("queues", "json"),
+        has_schedule: (await env.STATE.get("schedule")) !== null,
+      });
     }
     if (path === "/schedule" && request.method === "PUT" && auth) {
       await env.STATE.put("schedule", await request.text());
+      // Someone asked for the schedule while we had none: answer them now.
+      if (await env.STATE.get("pending_now")) {
+        await env.STATE.delete("pending_now");
+        await sendMessage(env, await currentSchedule(env));
+      }
       return Response.json({ ok: true });
+    }
+    if (path === "/check") {
+      return Response.json(await check(env), { headers: { "Cache-Control": "no-store" } });
     }
     return new Response("not found", { status: 404 });
   },
@@ -72,10 +87,78 @@ async function handleUpdate(update, env) {
 }
 
 async function currentSchedule(env) {
-  const schedule = await env.STATE.get("schedule", "json");
-  if (!schedule) return "Графіка ще немає — дочекайтеся першої перевірки сайту.";
+  let schedule = await env.STATE.get("schedule", "json");
+  if (!schedule) {
+    // Nothing saved yet: read the DTEK page ourselves and keep the result.
+    schedule = await fetchFromSite();
+    if (schedule) {
+      await env.STATE.put("schedule", JSON.stringify(schedule));
+    } else if (await startGithubCheck(env)) {
+      await env.STATE.put("pending_now", "1", { expirationTtl: 1800 });
+      return "⏳ Перевіряю сайт ДТЕК — графік прийде за кілька хвилин.";
+    } else {
+      return "Графіка ще немає — дочекайтеся першої перевірки сайту.";
+    }
+  }
   const queues = (await env.STATE.get("queues", "json")) || [];
   return buildMessage(schedule.fact, schedule.names || {}, queues);
+}
+
+// Returns {fact, names} from the DTEK page, or null if the site didn't give it to us
+// (it sometimes shows an anti-bot page instead).
+async function fetchFromSite() {
+  try {
+    const r = await fetch(SITE_URL, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+          "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "Accept-Language": "uk-UA,uk;q=0.9",
+      },
+      signal: AbortSignal.timeout(15000),
+    });
+    const html = await r.text();
+    const fact = extractJson(html, "fact");
+    if (!fact?.data) return null;
+    return { fact, names: extractJson(html, "preset")?.sch_names || {} };
+  } catch (e) {
+    console.log("DTEK fetch failed:", e.message);
+    return null;
+  }
+}
+
+// Reads the JSON object after "DisconSchedule.<name> =" in the page.
+function extractJson(html, name) {
+  let i = html.indexOf(`DisconSchedule.${name}`);
+  if (i < 0) return null;
+  i = html.indexOf("{", html.indexOf("=", i));
+  let depth = 0, inString = false;
+  for (let j = i; j < html.length; j++) {
+    const c = html[j];
+    if (inString) {
+      if (c === "\\") j++;
+      else if (c === '"') inString = false;
+    } else if (c === '"') inString = true;
+    else if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) return JSON.parse(html.slice(i, j + 1));
+  }
+  return null;
+}
+
+// Starts the GitHub workflow; it sends the schedule to PUT /schedule when done.
+async function startGithubCheck(env) {
+  if (!env.GH_TOKEN || !env.GH_REPO) return false;
+  const r = await fetch(
+    `https://api.github.com/repos/${env.GH_REPO}/actions/workflows/monitor.yml/dispatches`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.GH_TOKEN}`,
+        Accept: "application/vnd.github+json",
+        "User-Agent": "dtek-bot-worker",
+      },
+      body: JSON.stringify({ ref: "main" }),
+    });
+  if (!r.ok) console.log("GitHub dispatch failed:", r.status, await r.text());
+  return r.ok;
 }
 
 // --- same logic as monitor.py ---
@@ -133,9 +216,39 @@ function buildMessage(fact, names, queues) {
 async function sendMessage(env, text, markup) {
   const body = { chat_id: env.CHAT_ID, text, parse_mode: "HTML", disable_web_page_preview: true };
   if (markup) body.reply_markup = markup;
-  await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
+  const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  if (!r.ok) console.log("sendMessage failed:", r.status, await r.text());
+}
+
+// Setup diagnostics. Shows only yes/no and Telegram's own status, never secret values.
+async function check(env) {
+  const out = {
+    BOT_TOKEN: !!env.BOT_TOKEN,
+    CHAT_ID: !!env.CHAT_ID,
+    SECRET: !!env.SECRET,
+    SECRET_valid_chars: /^[A-Za-z0-9_-]{1,256}$/.test(env.SECRET || ""),
+    STATE_kv_bound: !!env.STATE?.get,
+  };
+  if (out.STATE_kv_bound) {
+    out.schedule_received_from_github = !!(await env.STATE.get("schedule"));
+    out.queues = await env.STATE.get("queues", "json");
+  }
+  out.dtek_site_readable_from_worker = !!(await fetchFromSite());
+  out.github_fallback_configured = !!(env.GH_TOKEN && env.GH_REPO);
+  if (env.BOT_TOKEN) {
+    const tg = (m) => fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${m}`).then((r) => r.json());
+    const me = await tg("getMe");
+    out.bot = me.ok ? "@" + me.result.username : `token rejected: ${me.description}`;
+    const wh = await tg("getWebhookInfo");
+    if (wh.ok) {
+      out.webhook_url = wh.result.url || "(not set)";
+      out.webhook_pending_updates = wh.result.pending_update_count;
+      out.webhook_last_error = wh.result.last_error_message || null;
+    }
+  }
+  return out;
 }

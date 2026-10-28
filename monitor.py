@@ -20,6 +20,10 @@ CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 # Default queues until you pick some in the bot, e.g. "6.1" or "GPV3.1,4.2". Empty = all.
 DEFAULT_QUEUES = os.environ.get("QUEUES", "")
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+# Optional Cloudflare Worker (worker.js) that answers bot commands instantly.
+# When set, the queue choice lives in the Worker and this script sends it each new schedule.
+WORKER_URL = os.environ.get("WORKER_URL", "").rstrip("/")
+WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
 
 ALL_LABEL = "Усі черги"
 # Queue picker shown on /start or /queue: 1.1 1.2 / ... / 6.1 6.2 / Усі черги.
@@ -132,10 +136,24 @@ def build_message(fact, preset, queues, title="Графік відключень
     return "\n".join(lines)
 
 
-def relevant(fact, queues):
-    """The part of the data we compare (ignores the 'update' timestamp)."""
-    return {ts: {q: g for q, g in groups.items() if not queues or q in queues}
-            for ts, groups in fact["data"].items()}
+def day_hashes(fact):
+    """{queue: {day_ts: short hash of that day's hours}} for every queue."""
+    out = {}
+    for ts, groups in fact["data"].items():
+        for q, hours in groups.items():
+            h = hashlib.sha256(json.dumps(hours, sort_keys=True).encode()).hexdigest()[:16]
+            out.setdefault(q, {})[ts] = h
+    return out
+
+
+def changed(hashes, seen, queues):
+    """True if any day of the watched queues is new or different.
+
+    Days that disappear (yesterday at midnight) don't count, and switching
+    queues doesn't count either, because hashes are kept for every queue.
+    """
+    return any(seen.get(q, {}).get(ts) != h
+               for q in (queues or hashes) for ts, h in hashes.get(q, {}).items())
 
 
 def send(text, markup=None):
@@ -153,6 +171,13 @@ def reply(text, markup=None):
         send(text, markup)
     except requests.RequestException as e:
         print(f"Could not send reply: {e}")
+
+
+def worker(method, path, **kw):
+    r = HTTP.request(method, f"{WORKER_URL}{path}", timeout=30,
+                     headers={"Authorization": f"Bearer {WORKER_SECRET}"}, **kw)
+    r.raise_for_status()
+    return r.json()
 
 
 def handle_messages(state):
@@ -193,14 +218,24 @@ def main():
     if "queues" not in state:
         state["queues"] = parse_queues(DEFAULT_QUEUES) or []
 
-    try:
-        want_now = handle_messages(state)
-    except requests.RequestException as e:
-        print(f"Could not read bot messages: {e}")  # still check the schedule
-        want_now = False
-    # Save right away so commands aren't re-processed if fetching the page fails.
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
+    want_now = False
+    worker_needs_schedule = False
+    if WORKER_URL:
+        try:
+            info = worker("GET", "/queues")
+            if info["queues"] is not None:  # None = not chosen in the bot yet
+                state["queues"] = info["queues"]
+            worker_needs_schedule = not info.get("has_schedule", True)
+        except requests.RequestException as e:
+            print(f"Could not reach worker, using saved queues: {e}")
+    else:
+        try:
+            want_now = handle_messages(state)
+        except requests.RequestException as e:
+            print(f"Could not read bot messages: {e}")  # still check the schedule
+        # Save right away so commands aren't re-processed if fetching the page fails.
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f)
 
     # Optional: pass a saved HTML file for offline testing.
     if len(sys.argv) > 1:
@@ -210,17 +245,29 @@ def main():
         html = fetch_html()
     fact, preset = extract(html, "fact"), extract(html, "preset")
     queues = state["queues"]
-    digest = hashlib.sha256(json.dumps(relevant(fact, queues), sort_keys=True).encode()).hexdigest()
+    hashes = day_hashes(fact)
+    # Upgrading from the old single-digest state: take today's data as the baseline.
+    upgrading = "seen" not in state and "digest" in state
 
     if want_now:
         send(build_message(fact, preset, queues, title="Поточний графік відключень"))
         print("Sent current schedule on request.")
-    elif digest != state.get("digest"):
+    elif not upgrading and changed(hashes, state.get("seen", {}), queues):
         send(build_message(fact, preset, queues))
         print("Change detected, notification sent.")
     else:
         print("No change.")
-    state.update(digest=digest, update=fact.get("update"))
+
+    if WORKER_URL and (worker_needs_schedule or fact.get("update") != state.get("update")
+                       or hashes != state.get("seen")):
+        try:
+            worker("PUT", "/schedule", json={"fact": fact, "names": preset.get("sch_names", {})})
+        except requests.RequestException as e:
+            print(f"Could not send schedule to worker: {e}")
+            fact["update"] = None  # makes the next run push it again
+
+    state.pop("digest", None)
+    state.update(seen=hashes, update=fact.get("update"))
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
 
