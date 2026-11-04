@@ -143,8 +143,8 @@ async function statusText(env, queues) {
     const plug = await env.STATE.get("plug", "json");
     if (plug) {
       parts.push(plug.online
-        ? `🔌 Зараз світло є (з ${kyivTime(plug.since)})`
-        : `🔌 Зараз світла немає (з ${kyivTime(plug.since)}, вже ${duration(plug.since)})`);
+        ? `🟢 Зараз світло є (з ${kyivTime(plug.since)})`
+        : `🔴 Зараз світла немає (з ${kyivTime(plug.since)}, вже ${duration(plug.since)})`);
     }
   }
   parts.push(schedule ? scheduleText(schedule, queues)
