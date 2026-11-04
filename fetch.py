@@ -18,7 +18,17 @@ def extract(html, name):
     return json.JSONDecoder().raw_decode(html, i)[0]
 
 
-def page_html():
+# The schedule embedded in the HTML is a cached copy. Right after loading, the page asks
+# the server for anything newer ("checkDisconUpdate") and swaps the data in; do the same.
+# Runs inside the page, so it reuses its cookies; yii.js adds the CSRF token.
+FRESH_JS = """(update) => new Promise((resolve) => {
+    const url = document.querySelector('meta[name="ajaxUrl"]').content;
+    $.post(url, {method: 'checkDisconUpdate', update}, resolve, 'json').fail(() => resolve(null));
+})"""
+
+
+def fetch():
+    """{"fact": ..., "names": ...} with the newest schedule DTEK has."""
     with sync_playwright() as p:
         browser = p.chromium.launch(channel="chrome",
                                     args=["--disable-blink-features=AutomationControlled"])
@@ -31,13 +41,25 @@ def page_html():
             except PlaywrightError:  # page is reloading
                 html = ""
             if "DisconSchedule.fact" in html:
-                return html
+                break
             page.wait_for_timeout(2000)
-    raise SystemExit("Schedule not found on the DTEK page")
+        else:
+            raise SystemExit("Schedule not found on the DTEK page")
+
+        fact, preset = extract(html, "fact"), extract(html, "preset")
+        try:
+            page.wait_for_load_state("load", timeout=15_000)
+            answer = page.evaluate(FRESH_JS, fact.get("update", "")) or {}
+        except PlaywrightError as e:
+            print(f"Could not ask for a newer schedule, using the page's copy: {e}")
+            answer = {}
+        if answer.get("fact", {}).get("data"):
+            print(f"Page had {fact.get('update')}, server has {answer['fact'].get('update')}")
+            fact, preset = answer["fact"], answer.get("preset") or preset
+        return {"fact": fact, "names": preset.get("sch_names", {})}
 
 
-html = page_html()
-schedule = {"fact": extract(html, "fact"), "names": extract(html, "preset").get("sch_names", {})}
+schedule = fetch()
 r = requests.put(f"{os.environ['WORKER_URL'].rstrip('/')}/schedule", json=schedule, timeout=30,
                  headers={"Authorization": f"Bearer {os.environ['WORKER_SECRET']}"})
 r.raise_for_status()
