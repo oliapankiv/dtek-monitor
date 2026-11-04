@@ -143,8 +143,9 @@ async function statusText(env, queues) {
     const plug = await env.STATE.get("plug", "json");
     if (plug) {
       parts.push(plug.online
-        ? `🟢 Зараз світло є (з ${kyivTime(plug.since)})`
-        : `🔴 Зараз світла немає (з ${kyivTime(plug.since)}, вже ${duration(plug.since)})`);
+        ? `🟢 Зараз світло є з ${kyivTime(plug.since)}${plugQueueLabel(env, queues)}`
+        : `🔴 Зараз світла немає з ${kyivTime(plug.since)}, вже ${duration(plug.since)}` +
+          plugQueueLabel(env, queues));
     }
   }
   parts.push(schedule ? scheduleText(schedule, queues)
@@ -292,12 +293,17 @@ async function checkPlug(env) {
   await env.STATE.put("plug", JSON.stringify({ online, since: now }));
   if (!old) return; // first check: just remember
 
-  const text = online
-    ? `🟢 <b>Світло з'явилося</b> о ${kyivTime(now)}\nНе було: ${duration(old.since, now)}`
-    : `🔴 <b>Світло зникло</b> о ${kyivTime(now)}`;
   for await (const u of users(env)) {
-    if (u.queues.includes(env.PLUG_QUEUE)) await send(env, u.chat, `${text}\n(черга ${env.PLUG_QUEUE})`);
+    if (!u.queues.includes(env.PLUG_QUEUE)) continue;
+    const q = plugQueueLabel(env, u.queues);
+    await send(env, u.chat, online
+      ? `🟢 <b>Світло з'явилося</b> о ${kyivTime(now)}${q}, не було ${duration(old.since, now)}`
+      : `🔴 <b>Світло зникло</b> о ${kyivTime(now)}${q}`);
   }
+}
+
+function plugQueueLabel(env, queues) {
+  return queues.length > 1 ? ` (черга ${env.PLUG_QUEUE})` : "";
 }
 
 async function plugOnline(env) {
