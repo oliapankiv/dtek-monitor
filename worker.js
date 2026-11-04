@@ -61,6 +61,13 @@ export default {
 // ---------- Telegram ----------
 
 async function onUpdate(env, update) {
+  // "Stop and block bot" (or the bot removed from a group): forget the user right away,
+  // so after Restart /start asks for the queue again.
+  const member = update.my_chat_member;
+  if (member && ["kicked", "left"].includes(member.new_chat_member?.status)) {
+    return env.STATE.delete(`user:${member.chat.id}`);
+  }
+
   const msg = update.message;
   if (!msg?.text) return;
   const chat = msg.chat.id;
@@ -265,7 +272,6 @@ function scheduleText({ fact, names }, queues, title = "Графік відкл�
       lines.push(`${names?.[`GPV${q}`] || `Черга ${q}`}: ${text}`);
     }
   }
-  lines.push("", SITE_URL);
   return lines.join("\n");
 }
 
@@ -358,7 +364,7 @@ async function setup(env, origin) {
     webhook: await telegram(env, "setWebhook", {
       url: `${origin}/telegram`,
       secret_token: env.SECRET,
-      allowed_updates: ["message"],
+      allowed_updates: ["message", "my_chat_member"],
     }),
     commands: await telegram(env, "setMyCommands", {
       commands: [
